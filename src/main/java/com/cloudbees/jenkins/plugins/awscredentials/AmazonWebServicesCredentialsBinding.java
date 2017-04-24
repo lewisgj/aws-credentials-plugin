@@ -26,7 +26,7 @@
 package com.cloudbees.jenkins.plugins.awscredentials;
 
 import com.amazonaws.auth.AWSCredentials;
-import edu.umd.cs.findbugs.annotations.CheckForNull;
+import com.amazonaws.auth.InstanceProfileCredentialsProvider;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import hudson.Extension;
@@ -34,23 +34,24 @@ import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.Run;
 import hudson.model.TaskListener;
+import hudson.remoting.Callable;
 import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.plugins.credentialsbinding.BindingDescriptor;
 import org.jenkinsci.plugins.credentialsbinding.MultiBinding;
+import org.jenkinsci.remoting.RoleChecker;
 import org.kohsuke.stapler.DataBoundConstructor;
 
 import javax.annotation.Nonnull;
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+import java.util.logging.Logger;
 
 /**
  * @author <a href="mailto:nicolas.deloof@gmail.com">Nicolas De Loof</a>
  */
 public class AmazonWebServicesCredentialsBinding extends MultiBinding<AmazonWebServicesCredentials> {
+
+    private static final Logger LOG = Logger.getLogger( AmazonWebServicesCredentialsBinding.class.getName() );
 
     public final static String DEFAULT_ACCESS_KEY_ID_VARIABLE_NAME = "AWS_ACCESS_KEY_ID";
     private final static String DEFAULT_SECRET_ACCESS_KEY_VARIABLE_NAME = "AWS_SECRET_ACCESS_KEY";
@@ -61,7 +62,6 @@ public class AmazonWebServicesCredentialsBinding extends MultiBinding<AmazonWebS
     private final String secretKeyVariable;
 
     /**
-     *
      * @param accessKeyVariable if {@code null}, {@value DEFAULT_ACCESS_KEY_ID_VARIABLE_NAME} will be used.
      * @param secretKeyVariable if {@code null}, {@value DEFAULT_SECRET_ACCESS_KEY_VARIABLE_NAME} will be used.
      * @param credentialsId
@@ -91,10 +91,48 @@ public class AmazonWebServicesCredentialsBinding extends MultiBinding<AmazonWebS
     @Override
     public MultiEnvironment bind(@Nonnull Run<?, ?> build, FilePath workspace, Launcher launcher, TaskListener listener) throws IOException, InterruptedException {
         AWSCredentials credentials = getCredentials(build).getCredentials();
-        Map<String,String> m = new HashMap<String,String>();
+
+        if (credentialsAreNullOrEmpty(credentials)) {
+            credentials = getSlaveInstanceProfileCredentials(launcher);
+        }
+
+        Map<String, String> m = new HashMap<>();
+
         m.put(accessKeyVariable, credentials.getAWSAccessKeyId());
         m.put(secretKeyVariable, credentials.getAWSSecretKey());
         return new MultiEnvironment(m);
+    }
+
+    private boolean credentialsAreNullOrEmpty(AWSCredentials credentials) {
+        return credentials == null || (StringUtils.isBlank(credentials.getAWSAccessKeyId()) && StringUtils.isBlank(credentials.getAWSSecretKey()));
+    }
+
+    private AWSCredentials getSlaveInstanceProfileCredentials(Launcher launcher) {
+
+        Callable<AWSCredentials, IOException> task = new Callable<AWSCredentials, IOException>() {
+            @Override
+            public void checkRoles(RoleChecker roleChecker) throws SecurityException {
+            }
+
+            public AWSCredentials call() throws IOException {
+                return new InstanceProfileCredentialsProvider().getCredentials();
+            }
+        };
+
+
+        AWSCredentials credentials = null;
+
+        try {
+            credentials = launcher.getChannel().call(task);
+        } catch (InterruptedException | IOException ignored) {
+
+        } finally {
+            if (credentials == null) {
+               LOG.warning("Could not find instance profile credentials");
+            }
+        }
+
+        return credentials;
     }
 
     @Override
@@ -105,11 +143,13 @@ public class AmazonWebServicesCredentialsBinding extends MultiBinding<AmazonWebS
     @Extension
     public static class DescriptorImpl extends BindingDescriptor<AmazonWebServicesCredentials> {
 
-        @Override protected Class<AmazonWebServicesCredentials> type() {
+        @Override
+        protected Class<AmazonWebServicesCredentials> type() {
             return AmazonWebServicesCredentials.class;
         }
 
-        @Override public String getDisplayName() {
+        @Override
+        public String getDisplayName() {
             return "AWS access key and secret";
         }
     }
